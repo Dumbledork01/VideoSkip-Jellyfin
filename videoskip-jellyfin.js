@@ -4,9 +4,6 @@
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
-// Endpoint provided by the Jellyfin.Plugin.VideoSkip server plugin.
-// The plugin handles both local sidecar lookup and VideoSkip Exchange fallback.
-// No configuration needed here — install the plugin and it works automatically.
 const SKP_PLUGIN_ENDPOINT = '/api/videoskip/';
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -70,24 +67,44 @@ function injectPanel(osd) {
   `;
 
   panel.innerHTML = `
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+    <div id="vs-header" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; cursor:pointer;">
       <strong>VideoSkip</strong>
-      <span id="vs-status" style="font-size:11px; color:#aaa;">No file loaded</span>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span id="vs-status" style="font-size:11px; color:#aaa;">No file loaded</span>
+        <span id="vs-toggle" style="font-size:11px; color:#aaa;">▲</span>
+      </div>
     </div>
 
-    <input type="file" id="vs-file-input" accept=".skp" style="display:none"/>
-    <button id="vs-load-btn" style="
-      width:100%; padding:6px; margin-bottom:12px;
-      background:#444; border:none; border-radius:4px;
-      color:white; cursor:pointer; font-size:13px;
-    ">Load .skp file</button>
+    <div id="vs-body" style="display:none;">
+      <input type="file" id="vs-file-input" accept=".skp" style="display:none"/>
+      <button id="vs-load-btn" style="
+        width:100%; padding:6px; margin-bottom:6px;
+        background:#444; border:none; border-radius:4px;
+        color:white; cursor:pointer; font-size:13px;
+      ">Load .skp file</button>
 
-    <div style="margin-bottom:8px; font-weight:bold; color:#ccc;">Filter levels (0 = off, 3 = strict)</div>
+      <button id="vs-cuts-btn" style="
+        width:100%; padding:6px; margin-bottom:12px;
+        background:#444; border:none; border-radius:4px;
+        color:white; cursor:pointer; font-size:13px;
+      ">View Cuts</button>
 
-    ${makeSlider('sex',       'Sex')}
-    ${makeSlider('violence',  'Violence')}
-    ${makeSlider('profanity', 'Profanity')}
-    ${makeSlider('other',     'Other')}
+      <div id="vs-cuts-list" style="
+        display:none;
+        max-height:200px;
+        overflow-y:auto;
+        margin-bottom:12px;
+        font-size:11px;
+        color:#ccc;
+      "></div>
+
+      <div style="margin-bottom:8px; font-weight:bold; color:#ccc;">Filter levels (0 = off, 3 = strict)</div>
+
+      ${makeSlider('sex',       'Sex')}
+      ${makeSlider('violence',  'Violence')}
+      ${makeSlider('profanity', 'Profanity')}
+      ${makeSlider('other',     'Other')}
+    </div>
   `;
 
   osd.appendChild(panel);
@@ -163,10 +180,19 @@ function hideBlurBox() {
 // ─── Event Wiring ─────────────────────────────────────────────────────────────
 
 function wireListeners() {
+  document.getElementById('vs-header').addEventListener('click', () => {
+    const body   = document.getElementById('vs-body');
+    const toggle = document.getElementById('vs-toggle');
+    const expanded = body.style.display !== 'none';
+    body.style.display = expanded ? 'none' : 'block';
+    toggle.textContent = expanded ? '▲' : '▼';
+  });
+
   document.getElementById('vs-load-btn').addEventListener('click', () => {
     document.getElementById('vs-file-input').click();
   });
   document.getElementById('vs-file-input').addEventListener('change', handleFileLoad);
+  document.getElementById('vs-cuts-btn').addEventListener('click', toggleCutsList);
 
   ['sex', 'violence', 'profanity', 'other'].forEach(cat => {
     const slider = document.getElementById(`vs-${cat}`);
@@ -175,6 +201,42 @@ function wireListeners() {
       label.textContent = slider.value;
     });
   });
+}
+
+// ─── Cuts List ────────────────────────────────────────────────────────────────
+
+function toggleCutsList() {
+  const list = document.getElementById('vs-cuts-list');
+  const btn  = document.getElementById('vs-cuts-btn');
+  if (!list) return;
+
+  if (list.style.display === 'none') {
+    if (cuts.length === 0) {
+      list.innerHTML = '<div style="color:#888; padding:4px;">No cuts loaded</div>';
+    } else {
+      list.innerHTML = cuts.map((c, i) => `
+        <div style="padding:4px 0; border-bottom:1px solid #333;">
+          <span style="color:#aaa;">${i + 1}.</span>
+          <span style="color:#fff;"> ${toHMS(c.start)} → ${toHMS(c.end)}</span>
+          <span style="color:#888; margin-left:6px;">${c.category} / ${c.action} / sev ${c.severity}</span>
+        </div>
+      `).join('');
+    }
+    list.style.display = 'block';
+    btn.textContent = 'Hide Cuts';
+  } else {
+    list.style.display = 'none';
+    btn.textContent = 'View Cuts';
+  }
+}
+
+function toHMS(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = (seconds % 60).toFixed(1);
+  return h > 0
+    ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(4, '0')}`
+    : `${m}:${String(s).padStart(4, '0')}`;
 }
 
 // ─── Auto-load ────────────────────────────────────────────────────────────────
@@ -202,8 +264,6 @@ function waitForVideoSrc() {
 
 async function tryAutoLoad() {
   try {
-    // Step 1: Get item ID from the playing video's src URL
-    // Jellyfin src URLs look like: /Videos/{itemId}/stream.mkv?...
     const videoSrc = await waitForVideoSrc();
     if (!videoSrc) return;
 
@@ -211,16 +271,13 @@ async function tryAutoLoad() {
     const itemId = srcMatch?.[1] ?? null;
     if (!itemId) return;
 
-    // Avoid re-fetching if we already loaded for this item
     if (itemId === lastItemId) return;
     lastItemId = itemId;
 
-    // Clear previous video's cuts immediately
     cuts = [];
     restoreVideo();
     setStatus('Searching...', '#aaa');
 
-    // Step 2: Get auth token from Jellyfin's global ApiClient
     const apiClient = window.ApiClient;
     if (!apiClient) {
       console.log('[VideoSkip] ApiClient not available');
@@ -229,8 +286,6 @@ async function tryAutoLoad() {
 
     const token = apiClient.accessToken();
 
-    // Step 3: Call the VideoSkip server plugin endpoint.
-    // The plugin handles sidecar lookup and Exchange fallback server-side.
     const skpRes = await fetch(`${SKP_PLUGIN_ENDPOINT}${itemId}`, {
       headers: { 'X-Emby-Token': token }
     });
@@ -241,7 +296,6 @@ async function tryAutoLoad() {
       return;
     }
 
-    // Step 4: Parse and apply
     const text = await skpRes.text();
     cuts = parseSkp(text.split('data:image')[0]);
 
@@ -396,6 +450,7 @@ function applyAction(cut) {
 }
 
 function restoreVideo() {
+  if (!videoEl) return;
   videoEl.muted = false;
   videoEl.style.visibility = 'visible';
   videoEl.style.filter = 'none';
