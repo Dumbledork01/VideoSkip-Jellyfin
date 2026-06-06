@@ -17,8 +17,8 @@ The injected JavaScript client calls this when playback starts. The plugin:
 
 ## Requirements
 
-- [.NET SDK 8.0](https://dotnet.microsoft.com/download/dotnet/8.0)
-- Jellyfin Server 10.10.x
+- [.NET SDK 9.0](https://dotnet.microsoft.com/en-us/download/dotnet/9.0)
+- Jellyfin Server 10.11.8
 
 > **Note:** If your Jellyfin server version differs, update the `Version` attributes in `Jellyfin.Plugin.VideoSkip.csproj` to match. The package version must match your installed Jellyfin version exactly.
 
