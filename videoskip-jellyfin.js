@@ -16,6 +16,7 @@ let videoEl = null;
 let blurBoxEl = null;
 let inCut = false;
 let lastItemId = null;
+let lastStatus = { text: 'No file loaded', color: '#aaa' };
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -90,6 +91,13 @@ function injectPanel(osd) {
   `;
 
   osd.appendChild(panel);
+
+  // Restore status in case auto-load already ran before panel was injected
+  const statusEl = document.getElementById('vs-status');
+  if (statusEl) {
+    statusEl.textContent = lastStatus.text;
+    statusEl.style.color = lastStatus.color;
+  }
 
   // Stop clicks from reaching the video player behind the panel
   ['click', 'mousedown', 'pointerdown'].forEach(evt => {
@@ -247,6 +255,7 @@ async function tryAutoLoad() {
 }
 
 function setStatus(text, color) {
+  lastStatus = { text, color };
   const status = document.getElementById('vs-status');
   if (status) {
     status.textContent = text;
