@@ -268,10 +268,21 @@ function toggleCutsList() {
       list.innerHTML = cuts.map((c, i) => `
         <div style="padding:4px 0; border-bottom:1px solid #333;">
           <span style="color:#aaa;">${i + 1}.</span>
-          <span style="color:#fff;"> ${toHMS(c.start)} → ${toHMS(c.end)}</span>
+          <span
+            class="vs-jump"
+            data-time="${c.start}"
+            style="color:#6af; cursor:pointer; text-decoration:underline;"
+          > ${toHMS(c.start)} → ${toHMS(c.end)}</span>
           <span style="color:#888; margin-left:6px;">${c.category} / ${c.action} / sev ${c.severity}</span>
         </div>
       `).join('');
+
+      // Wire up jump clicks
+      list.querySelectorAll('.vs-jump').forEach(el => {
+        el.addEventListener('click', () => {
+          if (videoEl) videoEl.currentTime = parseFloat(el.dataset.time);
+        });
+      });
     }
     list.style.display = 'block';
     btn.textContent = 'Hide Cuts';
