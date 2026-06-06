@@ -51,9 +51,9 @@ function injectPanel(osd) {
   const panel = document.createElement('div');
   panel.id = 'vs-panel';
   panel.style.cssText = `
-    position: absolute;
-    bottom: 80px;
-    right: 16px;
+    position: fixed;
+    bottom: 800px;
+    right: 20px;
     background: rgba(0, 0, 0, 0.75);
     padding: 12px 16px;
     border-radius: 8px;
@@ -61,7 +61,7 @@ function injectPanel(osd) {
     font-size: 13px;
     font-family: sans-serif;
     z-index: 1000;
-    min-width: 220px;
+    min-width: 250px;
     user-select: none;
     pointer-events: auto;
   `;
@@ -122,6 +122,57 @@ function injectPanel(osd) {
   });
 
   wireListeners();
+  makeDraggable(panel);
+}
+
+function makeDraggable(panel) {
+  const header = document.getElementById('vs-header');
+  if (!header) return;
+
+  let isDragging = false;
+  let didDrag = false;
+  let startX, startY, startLeft, startTop;
+
+  header.addEventListener('mousedown', (e) => {
+    if (e.target.id === 'vs-toggle') return;
+    isDragging = true;
+    didDrag = false;
+
+    const rect = panel.getBoundingClientRect();
+    startX    = e.clientX;
+    startY    = e.clientY;
+    startLeft = rect.left;
+    startTop  = rect.top;
+
+    panel.style.right  = 'auto';
+    panel.style.bottom = 'auto';
+    panel.style.left   = startLeft + 'px';
+    panel.style.top    = startTop  + 'px';
+
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) didDrag = true;
+    panel.style.left = (startLeft + dx) + 'px';
+    panel.style.top  = (startTop  + dy) + 'px';
+  });
+
+  document.addEventListener('mouseup', () => {
+    isDragging = false;
+  });
+
+  // Suppress the click that fires after a drag
+  header.addEventListener('click', (e) => {
+    if (didDrag) {
+      didDrag = false;
+      e.stopImmediatePropagation();
+    }
+  }, true);
 }
 
 function makeSlider(id, label) {
@@ -233,7 +284,7 @@ function toggleCutsList() {
 function toHMS(seconds) {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
-  const s = (seconds % 60).toFixed(1);
+  const s = (seconds % 60).toFixed(3);
   return h > 0
     ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(4, '0')}`
     : `${m}:${String(s).padStart(4, '0')}`;
@@ -411,10 +462,12 @@ function onTimeUpdate() {
   if (!videoEl || cuts.length === 0) return;
 
   const t = videoEl.currentTime;
-  const activeCut = cuts.find(c => t >= c.start && t < c.end);
+  const activeCuts = cuts.filter(c => t >= c.start && t < c.end && shouldApply(c));
 
-  if (activeCut && shouldApply(activeCut)) {
-    applyAction(activeCut);
+  if (activeCuts.length > 0) {
+    // Restore first so actions compose cleanly on each tick
+    restoreVideo();
+    activeCuts.forEach(applyAction);
     inCut = true;
   } else if (inCut) {
     restoreVideo();
