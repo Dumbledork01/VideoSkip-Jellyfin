@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http;
 using System.Text.RegularExpressions;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -42,9 +43,9 @@ public class VideoSkipController : ControllerBase
     {
         _libraryManager = libraryManager;
         _logger = logger;
-        _httpClient = httpClientFactory.CreateClient();
-        _httpClient.DefaultRequestHeaders.Add("User-Agent", "Jellyfin-VideoSkip-Plugin/1.0");
-        _httpClient.Timeout = TimeSpan.FromSeconds(10);
+
+        // Configured in PluginServiceRegistrator (User-Agent + 10s timeout)
+        _httpClient = httpClientFactory.CreateClient("VideoSkip");
     }
 
     /// <summary>
@@ -125,28 +126,40 @@ public class VideoSkipController : ControllerBase
     {
         try
         {
-            // Build a search query using IMDB ID if available, otherwise item name
-            var imdbId  = item.ProviderIds.TryGetValue("Imdb", out var id) ? id : null;
-            var searchQ = string.IsNullOrEmpty(imdbId)
-                ? Uri.EscapeDataString(item.Name)
-                : Uri.EscapeDataString(imdbId);
+            // The Exchange search is a *title* search — it does not index IMDB
+            // IDs, so querying "tt0111161" reliably returns zero results.
+            // Episodes are listed under their series name, as
+            // "Game of Thrones S1 E10: Fire and Blood (2011)", so search the
+            // series and pick the right episode out of the results below.
+            var episode = item as Episode;
+            var searchTerm = episode is not null && !string.IsNullOrEmpty(episode.SeriesName)
+                ? episode.SeriesName
+                : item.Name;
+
+            if (string.IsNullOrWhiteSpace(searchTerm))
+            {
+                _logger.LogDebug("[VideoSkip] No usable search term for item {ItemId}", item.Id);
+                return null;
+            }
 
             // Step 1: Search the Exchange for this title
-            var searchUrl = $"{ExchangeBaseUrl}/exchange/search/?q={searchQ}";
+            var searchUrl = $"{ExchangeBaseUrl}/exchange/search/?q={Uri.EscapeDataString(searchTerm)}";
             _logger.LogDebug("[VideoSkip] Searching Exchange: {Url}", searchUrl);
 
             var searchHtml = await _httpClient.GetStringAsync(searchUrl).ConfigureAwait(false);
 
-            // Step 2: Find the first video page link in the results
-            // Exchange search returns links like /exchange/videos/1234/
-            var videoMatch = Regex.Match(searchHtml, @"/exchange/videos/(\d+)/");
-            if (!videoMatch.Success)
+            // Step 2: Pick the right result out of the search page
+            var videoId = FindExchangeVideoId(searchHtml, item, episode);
+            if (videoId is null)
             {
-                _logger.LogDebug("[VideoSkip] No Exchange results for {Name}", item.Name);
+                _logger.LogDebug(
+                    "[VideoSkip] No Exchange result with a skip file for {Name} (searched \"{Term}\")",
+                    item.Name,
+                    searchTerm);
                 return null;
             }
 
-            var videoUrl = $"{ExchangeBaseUrl}{videoMatch.Value}";
+            var videoUrl = $"{ExchangeBaseUrl}/exchange/videos/{videoId}/";
             _logger.LogDebug("[VideoSkip] Found Exchange video page: {Url}", videoUrl);
 
             // Step 3: Load the video page and find the first skip file link
@@ -176,5 +189,83 @@ public class VideoSkipController : ControllerBase
             _logger.LogError(ex, "[VideoSkip] Exchange lookup failed for {Name}", item.Name);
             return null;
         }
+    }
+
+    // Search results look like:
+    //   <a href="/exchange/videos/437/">Game of Thrones S1 E10: Fire and Blood (2011)</a>
+    private static readonly Regex ResultLinkRegex = new(
+        @"<a\s+href=""/exchange/videos/(\d+)/"">([^<]*)</a>",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Picks the search result that actually corresponds to <paramref name="item"/>.
+    /// </summary>
+    private string? FindExchangeVideoId(string searchHtml, BaseItem item, Episode? episode)
+    {
+        // The search page has several sections; only "Videos with skip files"
+        // is useful. "Videos with requests" lists titles somebody has *asked*
+        // for, which have no skip file to download — matching those is why an
+        // unscoped search could pick an entry that then yields nothing.
+        var section = ExtractSkipFileSection(searchHtml);
+        if (section is null)
+        {
+            return null;
+        }
+
+        var matches = ResultLinkRegex.Matches(section);
+        if (matches.Count == 0)
+        {
+            return null;
+        }
+
+        if (episode is not null
+            && episode.ParentIndexNumber is int season
+            && episode.IndexNumber is int number)
+        {
+            // Results are ordered lexically, so "S1 E10" sorts before "S1 E1".
+            // Taking the first match returns the wrong episode's cuts.
+            var tag = $"S{season} E{number}:";
+            foreach (Match match in matches)
+            {
+                if (match.Groups[2].Value.Contains(tag, StringComparison.OrdinalIgnoreCase))
+                {
+                    return match.Groups[1].Value;
+                }
+            }
+
+            // Better to return nothing than to blank out the wrong scenes.
+            _logger.LogDebug(
+                "[VideoSkip] Exchange has {Series} but not {Tag}",
+                episode.SeriesName,
+                tag);
+            return null;
+        }
+
+        // For films, disambiguate same-titled releases by production year.
+        if (item.ProductionYear is int year)
+        {
+            var yearTag = $"({year})";
+            foreach (Match match in matches)
+            {
+                if (match.Groups[2].Value.Contains(yearTag, StringComparison.Ordinal))
+                {
+                    return match.Groups[1].Value;
+                }
+            }
+        }
+
+        return matches[0].Groups[1].Value;
+    }
+
+    private static string? ExtractSkipFileSection(string searchHtml)
+    {
+        var start = searchHtml.IndexOf("Videos with skip files", StringComparison.OrdinalIgnoreCase);
+        if (start < 0)
+        {
+            return null;
+        }
+
+        var end = searchHtml.IndexOf("Videos with requests", start, StringComparison.OrdinalIgnoreCase);
+        return end < 0 ? searchHtml[start..] : searchHtml[start..end];
     }
 }

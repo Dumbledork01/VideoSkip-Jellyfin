@@ -14,15 +14,50 @@ let blurBoxEl = null;
 let inCut = false;
 let lastItemId = null;
 let lastStatus = { text: 'No file loaded', color: '#aaa' };
+let osdObserver = null;
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
-const observer = new MutationObserver(() => {
+// jellyfin-web caches views: leaving the player adds a "hide" class to
+// #videoOsdPage instead of removing it, so ".videoOsdBottom exists" is not a
+// test for "the player is on screen" — the OSD stays in the DOM afterwards.
+function playerPageVisible() {
+  const page = document.getElementById('videoOsdPage');
+  if (!page) {
+    // Unfamiliar layout — fall back to the OSD's own presence rather than
+    // refusing to ever show the panel.
+    return !!document.querySelector('.videoOsdBottom');
+  }
+  return !page.classList.contains('hide');
+}
+
+function ensurePanel() {
+  // The OSD is only the "player is up" signal — the panel itself is mounted
+  // on <body> (see injectPanel).
   const osd = document.querySelector('.videoOsdBottom');
-  if (osd && !document.getElementById('vs-panel')) {
+  if (osd && playerPageVisible() && !document.getElementById('vs-panel')) {
     injectPanel(osd);
     injectBlurBox();
   }
+}
+
+// The panel and blur box live on <body>, so they outlive the player view and
+// have to be torn down by hand.
+function teardown() {
+  videoEl = null;
+  lastItemId = null;
+  cuts = [];
+  inCut = false;
+  osdObserver?.disconnect();
+  osdObserver = null;
+  document.getElementById('vs-panel')?.remove();
+  blurBoxEl?.remove();
+  blurBoxEl = null;
+  setStatus('No file loaded', '#aaa');
+}
+
+const observer = new MutationObserver(() => {
+  ensurePanel();
 
   const newVideo = document.querySelector('video');
   if (newVideo && newVideo !== videoEl) {
@@ -33,26 +68,47 @@ const observer = new MutationObserver(() => {
     tryAutoLoad();
   }
 
-  // If video element is gone, reset so re-entering triggers a fresh load
-  if (!newVideo && videoEl) {
-    videoEl = null;
-    lastItemId = null;
-    cuts = [];
-    inCut = false;
-    setStatus('No file loaded', '#aaa');
+  // Reset when the video goes away, or when the player view has been hidden
+  // out from under a panel that is still on screen.
+  if ((!newVideo && videoEl)
+      || (!playerPageVisible() && document.getElementById('vs-panel'))) {
+    teardown();
   }
 });
 
 observer.observe(document.body, { childList: true, subtree: true });
+
+// Navigating away only toggles a class, which a childList observer never sees.
+// jellyfin-web dispatches bubbling "viewhide"/"viewshow" CustomEvents on the
+// page element itself, so drive the panel's lifetime off those.
+document.addEventListener('viewhide', (e) => {
+  if (e.target instanceof Element && e.target.id === 'videoOsdPage') {
+    teardown();
+  }
+});
+
+document.addEventListener('viewshow', (e) => {
+  if (e.target instanceof Element && e.target.id === 'videoOsdPage') {
+    ensurePanel();
+  }
+});
 
 // ─── Panel UI ─────────────────────────────────────────────────────────────────
 
 function injectPanel(osd) {
   const panel = document.createElement('div');
   panel.id = 'vs-panel';
+  // Mounted on <body>, not inside .videoOsdBottom. The OSD sets
+  // "will-change: opacity", which makes it a stacking context — anything
+  // nested inside it is trapped below the OSD header (z-index 1), no matter
+  // how high its own z-index is. On <body> the panel competes in the root
+  // stacking context and can actually sit on top.
+  //
+  // "top: 140px" keeps it clear of the 7.5em OSD header, which swallows
+  // pointer events across its full width in Jellyfin 12's modern layout.
   panel.style.cssText = `
     position: fixed;
-    bottom: 800px;
+    top: 140px;
     right: 20px;
     background: rgba(0, 0, 0, 0.75);
     padding: 12px 16px;
@@ -60,7 +116,7 @@ function injectPanel(osd) {
     color: white;
     font-size: 13px;
     font-family: sans-serif;
-    z-index: 1000;
+    z-index: 100000;
     min-width: 250px;
     user-select: none;
     pointer-events: auto;
@@ -107,7 +163,7 @@ function injectPanel(osd) {
     </div>
   `;
 
-  osd.appendChild(panel);
+  document.body.appendChild(panel);
 
   // Restore status in case auto-load already ran before panel was injected
   const statusEl = document.getElementById('vs-status');
@@ -123,6 +179,31 @@ function injectPanel(osd) {
 
   wireListeners();
   makeDraggable(panel);
+  followOsdVisibility(panel, osd);
+}
+
+// The panel used to fade with the OSD for free, by being a child of it.
+// Now that it lives on <body>, mirror the OSD's hidden state explicitly.
+// Scoped to the single OSD element and its class attribute — a body-wide
+// attribute observer would fire constantly while the seek slider updates.
+function followOsdVisibility(panel, osd) {
+  if (!osd) return;
+
+  const sync = () => {
+    const hidden = osd.classList.contains('videoOsdBottom-hidden');
+    panel.style.opacity = hidden ? '0' : '1';
+    panel.style.pointerEvents = hidden ? 'none' : 'auto';
+  };
+
+  panel.style.transition = 'opacity 0.3s ease-out';
+  sync();
+
+  osdObserver?.disconnect();
+  osdObserver = new MutationObserver(sync);
+  osdObserver.observe(osd, {
+    attributes: true,
+    attributeFilter: ['class'],
+  });
 }
 
 function makeDraggable(panel) {
@@ -208,7 +289,7 @@ function injectBlurBox() {
   blurBoxEl = box;
 }
 
-function showBlurBox(coords) {
+function showBlurBox(coords, action) {
   if (!blurBoxEl || !videoEl) return;
 
   const [x1, y1, x2, y2] = coords;
@@ -221,6 +302,18 @@ function showBlurBox(coords) {
   blurBoxEl.style.top    = (vTop  + (y1 / 100) * vh) + 'px';
   blurBoxEl.style.width  = ((x2 - x1) / 100 * vw) + 'px';
   blurBoxEl.style.height = ((y2 - y1) / 100 * vh) + 'px';
+
+  // 'blank' paints an opaque black region; anything else blurs it.
+  if (action === 'blank') {
+    blurBoxEl.style.backdropFilter = 'none';
+    blurBoxEl.style.webkitBackdropFilter = 'none';
+    blurBoxEl.style.background = '#000';
+  } else {
+    blurBoxEl.style.backdropFilter = 'blur(20px)';
+    blurBoxEl.style.webkitBackdropFilter = 'blur(20px)';
+    blurBoxEl.style.background = 'transparent';
+  }
+
   blurBoxEl.style.display = 'block';
 }
 
@@ -346,10 +439,12 @@ async function tryAutoLoad() {
       return;
     }
 
+    // Jellyfin 12.0 dropped the legacy X-Emby-Token header (EnableLegacyAuthorization
+    // is off by default), so authenticate with the MediaBrowser scheme instead.
     const token = apiClient.accessToken();
 
     const skpRes = await fetch(`${SKP_PLUGIN_ENDPOINT}${itemId}`, {
-      headers: { 'X-Emby-Token': token }
+      headers: { 'Authorization': `MediaBrowser Token="${token}"` }
     });
 
     if (!skpRes.ok) {
@@ -491,7 +586,7 @@ function applyAction(cut) {
     switch (cut.action) {
       case 'blur':
       case 'blank':
-        showBlurBox(cut.coords);
+        showBlurBox(cut.coords, cut.action);
         break;
     }
     return;
@@ -505,7 +600,10 @@ function applyAction(cut) {
       videoEl.muted = true;
       break;
     case 'blank':
-      videoEl.style.visibility = 'hidden';
+      // Paint the video's own pixels black rather than hiding the element —
+      // visibility:hidden makes the video transparent and reveals whatever is
+      // layered behind it (e.g. Jellyfin's blurred backdrop).
+      videoEl.style.filter = 'brightness(0)';
       break;
     case 'blur':
       videoEl.style.filter = 'blur(24px)';
@@ -516,7 +614,6 @@ function applyAction(cut) {
 function restoreVideo() {
   if (!videoEl) return;
   videoEl.muted = false;
-  videoEl.style.visibility = 'visible';
   videoEl.style.filter = 'none';
   hideBlurBox();
 }
